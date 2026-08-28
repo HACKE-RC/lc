@@ -2,6 +2,9 @@
 
 `lc` lists local coding-agent sessions for the Git repository you are in. It reads local session stores only; no transcript leaves your machine.
 
+<img width="2560" height="1502" alt="image" src="https://github.com/user-attachments/assets/c1b32ef6-bd31-4c9b-94e4-1e2c45159d8d" />
+
+
 ## Install
 
 Install the published package with `uv`:

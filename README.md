@@ -4,13 +4,32 @@
 
 ## Install
 
-There are no third-party Python dependencies. From this checkout:
+Install the published package with `uv`:
 
 ```sh
-ln -sfn "$PWD/lc.py" ~/.local/bin/lc
+uv tool install list-coding-agents
 ```
 
-Ensure `~/.local/bin` is on your `PATH`, then run `lc`. You can also use `python3 lc.py` directly.
+`pipx` and `pip` work too:
+
+```sh
+pipx install list-coding-agents
+python3 -m pip install --user list-coding-agents
+```
+
+To install a development checkout instead:
+
+```sh
+sh scripts/install.sh
+```
+
+The checkout installer prefers `uv tool install`, then `pipx`, then `pip --user`. Make sure the resulting scripts directory is on your `PATH`, then run `lc`.
+
+The current PyPI distribution is `list-coding-agents` version `0.1.0`. Its import package and command are both still `lc`:
+
+```sh
+lc --version
+```
 
 ## Quick start
 

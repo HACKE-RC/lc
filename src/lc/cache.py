@@ -1,4 +1,7 @@
-"""Persistent metadata cache for Codex rollout discovery."""
+"""Persistent metadata cache for Codex rollout discovery.
+
+This module is intentionally independent from transcript adapters and the TUI.
+"""
 
 from __future__ import annotations
 

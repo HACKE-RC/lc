@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import sys
 import tempfile
@@ -6,14 +5,10 @@ import unittest
 from pathlib import Path
 from urllib.parse import quote
 
-from lc_core.codex_cache import CodexCache, CodexCacheEntry
-
-
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("lc_under_test", ROOT / "lc.py")
-lc = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = lc
-SPEC.loader.exec_module(lc)
+sys.path.insert(0, str(ROOT / "src"))
+from lc.cache import CodexCache, CodexCacheEntry
+from lc import cli as lc
 
 
 def jsonl(path, entries):

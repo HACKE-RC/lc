@@ -28,10 +28,11 @@ import urllib.parse
 from fnmatch import fnmatch
 from pathlib import Path
 
+from lc_core.codex_cache import CodexCache, CodexCacheEntry
+
 HOME = Path.home()
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "lc"
 CODEX_CACHE = CACHE_DIR / "codex-sessions.json"
-CODEX_CACHE_VERSION = 2
 
 # ---------------------------------------------------------------- primitives
 
@@ -116,28 +117,6 @@ def load_json(path: Path):
         return None
 
 
-def load_codex_cache() -> dict[str, list]:
-    """Return unchanged-rollout metadata from the local, disposable cache."""
-    cache = load_json(CODEX_CACHE)
-    if not isinstance(cache, dict) or cache.get("version") != CODEX_CACHE_VERSION:
-        return {}
-    sessions = cache.get("sessions")
-    return sessions if isinstance(sessions, dict) else {}
-
-
-def save_codex_cache(sessions: dict[str, list]) -> None:
-    """Atomically refresh the cache; a cache failure must never affect lc."""
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        temp = CODEX_CACHE.with_suffix(".tmp")
-        with open(temp, "w", encoding="utf-8") as fh:
-            json.dump({"version": CODEX_CACHE_VERSION, "sessions": sessions}, fh,
-                      separators=(",", ":"))
-        os.replace(temp, CODEX_CACHE)
-    except OSError:
-        pass
-
-
 def mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -191,12 +170,17 @@ WRAPPER_RE = re.compile(
     r".*?</\1>",
     re.S,
 )
+TITLE_SOURCE_LIMIT = 1 << 16
+TITLE_DISPLAY_LIMIT = 240
 
 
 def clean_title(text) -> str | None:
     """Normalise a candidate title, or return None if it is machine noise."""
     if not isinstance(text, str):
         return None
+    # Transcript turns may contain megabytes of injected context. A title is a
+    # label, not a transcript export: bound regex work and cached output.
+    text = text[:TITLE_SOURCE_LIMIT]
     cmd = re.search(r"<command-name>\s*(.*?)\s*</command-name>", text)
     if cmd:
         return cmd.group(1).strip() or None
@@ -209,7 +193,7 @@ def clean_title(text) -> str | None:
         return None
     if re.match(r"^#+ .{0,40}instructions for /", text):
         return None
-    return text
+    return text[:TITLE_DISPLAY_LIMIT].rstrip()
 
 
 def strip_wrappers(text) -> str | None:
@@ -333,18 +317,19 @@ def a_claude(keep, dir_ok):
 def a_codex(keep, dir_ok):
     base = HOME / ".codex" / "sessions"
     names = codex_session_names()
-    cache = load_codex_cache()
-    refreshed, changed = {}, 0
+    cache = CodexCache(CODEX_CACHE)
     for f in base.rglob("rollout-*.jsonl"):
         path = str(f)
         try:
             stat = f.stat()
         except OSError:
             continue
-        cached = cache.get(path)
-        if (isinstance(cached, list) and len(cached) == 6
-                and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size):
-            _, _, cwd, sid, cached_title, title_scanned = cached
+        cached = cache.get(path, stat)
+        if cached is not None:
+            cwd = cached.cwd
+            sid = cached.session_id
+            cached_title = cached.title
+            title_scanned = cached.title_scanned
             record_changed = False
         else:
             # Most rollouts belong to another project. Read only their compact
@@ -355,13 +340,15 @@ def a_codex(keep, dir_ok):
             cached_title = None
             title_scanned = False
             record_changed = True
-            changed += 1
         if not isinstance(cwd, str) or not cwd:
             continue
         title = names.get(sid) or cached_title
         if not keep(cwd):
-            refreshed[path] = [stat.st_mtime_ns, stat.st_size, cwd, sid, title, title_scanned]
+            cache.remember(path, CodexCacheEntry(
+                stat.st_mtime_ns, stat.st_size, cwd, sid, title, title_scanned,
+            ))
             continue
+        title_cache_changed = False
         if title is None and not title_scanned:
             blob = read_head(f, HEAD)
 
@@ -382,14 +369,12 @@ def a_codex(keep, dir_ok):
             _, pick = scan_twice(scan, stat.st_size)
             title = pick.value
             title_scanned = True
-            if not record_changed:
-                changed += 1
-        refreshed[path] = [stat.st_mtime_ns, stat.st_size, cwd, sid, title, title_scanned]
+            title_cache_changed = not record_changed
+        cache.remember(path, CodexCacheEntry(
+            stat.st_mtime_ns, stat.st_size, cwd, sid, title, title_scanned,
+        ), changed=title_cache_changed)
         yield Session("codex", sid, cwd, title, stat.st_mtime, f, stat.st_size)
-    # A live session changes on every agent turn. Re-reading that one file is
-    # cheaper than serialising the whole cache each time; persist bulk updates.
-    if not cache or changed > 1 or abs(len(refreshed) - len(cache)) > 1:
-        save_codex_cache(refreshed)
+    cache.flush()
 
 
 def a_droid(keep, dir_ok):
@@ -401,15 +386,20 @@ def a_droid(keep, dir_ok):
 
             def scan(limit, f=f):
                 cwd, name = None, None
+                pick = TitlePick()
                 for entry in jsonl_head(f, limit):
                     if entry.get("type") == "session_start":
                         cwd = entry.get("cwd")
                         name = clean_title(entry.get("title"))
                         if name and name.lower() in ("new session", "start new chat"):
                             name = None
-                    if cwd and name:
+                    elif entry.get("type") == "message" and not pick.best:
+                        message = entry.get("message") or {}
+                        if message.get("role") == "user" and not message.get("hookEventName"):
+                            pick.offer(blocks_to_text(message.get("content")))
+                    if cwd and (name or pick.best):
                         break
-                return cwd, name
+                return cwd, name or pick.value
 
             size = size_of(f)
             cwd, name = scan(HEAD)
@@ -506,10 +496,17 @@ def a_grok(keep, dir_ok):
         cwd = urllib.parse.unquote(wdir.name)
         if not keep(cwd):
             continue
+        prompts: dict[str, str] = {}
+        history = wdir / "prompt_history.jsonl"
+        if history.exists():
+            for entry in jsonl_head(history, 1 << 20):
+                sid, prompt = entry.get("session_id"), entry.get("prompt")
+                if sid and prompt and sid not in prompts and not entry.get("is_bash"):
+                    prompts[sid] = prompt
         for sdir in iter_dirs(wdir):
             summary = load_json(sdir / "summary.json") or {}
             sid = (summary.get("info") or {}).get("id", sdir.name)
-            title = clean_title(summary.get("session_summary"))
+            title = clean_title(summary.get("session_summary")) or clean_title(prompts.get(sid))
             ts = parse_ts(summary.get("last_active_at") or summary.get("updated_at")) or mtime(sdir)
             chat = sdir / "chat_history.jsonl"
             n = summary.get("num_messages")
@@ -525,7 +522,7 @@ def a_kimi(keep, dir_ok):
             continue
         sdir = Path(sdir)
         st = load_json(sdir / "state.json") or {}
-        title = clean_title(st.get("title"))
+        title = clean_title(st.get("title")) or clean_title(st.get("lastPrompt"))
         ts = parse_ts(st.get("updatedAt") or st.get("createdAt")) or mtime(sdir)
         yield Session("kimi", e.get("sessionId", sdir.name), cwd, title, ts, sdir)
 
@@ -598,8 +595,8 @@ def a_gemini(keep, dir_ok, candidates=()):
                 blob = read_head(f, 1 << 16)
                 sid = json_str(blob, "sessionId") or sid
                 ts = parse_ts(json_str(blob, "lastUpdated") or json_str(blob, "startTime")) or ts
-            # Gemini's local chat record likewise stores no display name.
-            yield Session("gemini", sid, cwd, "", ts, f, size_of(f))
+            title = next((text for role, text in gemini_messages(f) if role == "user"), None)
+            yield Session("gemini", sid, cwd, title, ts, f, size_of(f))
 
 
 def iter_dirs(base: Path):

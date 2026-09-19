@@ -7,8 +7,8 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from lc.cache import CodexCache, CodexCacheEntry
-from lc import cli as lc
+import lc.cli as lc  # noqa: E402
+from lc.cache import CodexCache, CodexCacheEntry  # noqa: E402
 
 
 def jsonl(path, entries):
@@ -65,8 +65,49 @@ class AdapterTitleFallbackTests(unittest.TestCase):
         ]}))
         self.assertEqual(self.sessions(lc.a_gemini)[0].title, "Gemini fallback")
 
+    def test_pi_prefers_session_name_and_falls_back_to_first_user_prompt(self):
+        named = self.home / ".pi/agent/sessions/--work-repo--/named.jsonl"
+        jsonl(named, [
+            {"type": "session", "version": 3, "id": "one", "cwd": self.cwd},
+            {"type": "message", "message": {"role": "user", "content": "Pi fallback"}},
+            {"type": "session_info", "name": "Named pi session"},
+        ])
+        unnamed = self.home / ".pi/agent/sessions/--work-repo--/unnamed.jsonl"
+        jsonl(unnamed, [
+            {"type": "session", "version": 3, "id": "two", "cwd": self.cwd},
+            {"type": "message", "message": {"role": "user", "content": [
+                {"type": "text", "text": "Pi fallback"},
+            ]}},
+        ])
+        sessions = {s.sid: s for s in self.sessions(lc.a_pi)}
+        self.assertEqual(sessions["one"].title, "Named pi session")
+        self.assertEqual(sessions["two"].title, "Pi fallback")
+
+    def test_pi_preview_follows_the_active_branch(self):
+        path = self.home / ".pi/agent/sessions/--work-repo--/one.jsonl"
+        jsonl(path, [
+            {"type": "session", "version": 3, "id": "one", "cwd": self.cwd},
+            {"type": "message", "id": "a", "parentId": None,
+             "message": {"role": "user", "content": "First"}},
+            {"type": "message", "id": "b", "parentId": "a",
+             "message": {"role": "assistant", "content": [
+                 {"type": "thinking", "thinking": "hidden"},
+                 {"type": "text", "text": "Old branch"},
+             ]}},
+            {"type": "message", "id": "c", "parentId": "a",
+             "message": {"role": "user", "content": "Active branch"}},
+        ])
+        session = self.sessions(lc.a_pi)[0]
+        self.assertEqual(lc.prev_pi(session), [
+            ("user", "First"),
+            ("user", "Active branch"),
+        ])
+
     def test_titles_are_bounded_labels_not_transcript_exports(self):
-        self.assertEqual(len(lc.clean_title("x" * 10_000)), lc.TITLE_DISPLAY_LIMIT)
+        title = lc.clean_title("x" * 10_000)
+        if title is None:
+            self.fail("clean_title rejected ordinary text")
+        self.assertEqual(len(title), lc.TITLE_DISPLAY_LIMIT)
 
 
 class CodexCacheTests(unittest.TestCase):

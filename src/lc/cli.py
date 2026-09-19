@@ -6,7 +6,7 @@ and prints the sessions whose working directory lives inside the current git
 repository (or the current directory when not in a repo).
 
 Supported agents: claude (Claude Code), codex, droid (Factory), opencode,
-cursor, copilot, grok, kimi, gemini.
+cursor, copilot, grok, kimi, gemini, pi.
 
 `lc -I` browses the same list with vim keys and resumes the selected session
 in the agent that created it.
@@ -137,7 +137,10 @@ def parse_ts(value) -> float:
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
-        v = float(value)
+        try:
+            v = float(value)
+        except (OverflowError, ValueError):
+            return 0.0
         return v / 1000.0 if v > 1e11 else v
     if isinstance(value, str):
         s = value.strip().replace("Z", "+00:00")
@@ -353,7 +356,7 @@ def a_codex(keep, dir_ok):
         if title is None and not title_scanned:
             blob = read_head(f, HEAD)
 
-            def scan(limit, f=f, blob=blob):
+            def scan(limit, f=f, blob=blob, cwd=cwd):
                 pick = TitlePick()
                 for entry in iter_lines(blob if limit <= len(blob) else read_head(f, limit)):
                     payload = entry.get("payload") or {}
@@ -435,7 +438,7 @@ def a_cursor(keep, dir_ok, candidates=()):
         # re-check keep() since folder filters aren't applied to that set
         if not keep(cwd):
             continue
-        wdir = base / hashlib.md5(cwd.encode()).hexdigest()
+        wdir = base / hashlib.new("md5", cwd.encode(), usedforsecurity=False).hexdigest()
         if not wdir.is_dir():
             continue
         for sdir in iter_dirs(wdir):
@@ -457,7 +460,7 @@ def a_cursor(keep, dir_ok, candidates=()):
                         raw = bytes.fromhex(raw).decode("utf-8", "replace")
                     meta = json.loads(raw)
             except Exception:
-                pass
+                meta = {}
             ts = parse_ts(meta.get("createdAt")) or mtime(db)
             yield Session(
                 "cursor",
@@ -528,6 +531,53 @@ def a_kimi(keep, dir_ok):
         yield Session("kimi", e.get("sessionId", sdir.name), cwd, title, ts, sdir)
 
 
+def a_pi(keep, dir_ok):
+    agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", HOME / ".pi" / "agent")).expanduser()
+    base = agent_dir / "sessions"
+    for pdir in iter_dirs(base):
+        # Pi encodes cwd in pdir.name, but the header is authoritative and lets
+        # us support both current and legacy encodings without guessing.
+        for f in pdir.glob("*.jsonl"):
+            header = next(iter(jsonl_head(f, CWD_HEAD)), None)
+            if not isinstance(header, dict) or header.get("type") != "session":
+                continue
+            sid, cwd = header.get("id"), header.get("cwd")
+            if not isinstance(sid, str) or not isinstance(cwd, str) or not cwd:
+                continue
+            if not keep(cwd):
+                continue
+
+            def scan(limit, f=f):
+                name, named = None, False
+                pick = TitlePick()
+                for entry in jsonl_head(f, limit):
+                    if entry.get("type") == "session_info":
+                        name = clean_title(entry.get("name"))
+                        named = True
+                    elif entry.get("type") == "message":
+                        message = entry.get("message") or {}
+                        if message.get("role") == "user":
+                            pick.offer(blocks_to_text(message.get("content")))
+                return name, named, pick
+
+            size = size_of(f)
+            name, _, pick = scan(HEAD)
+            tail_named = False
+            if size > HEAD:
+                # /name can be run long after the opening prompt. A small tail
+                # scan recovers the latest session_info without reading the
+                # whole transcript merely to discover that display name.
+                for entry in iter_lines(tail_bytes(f, TAIL_SIZES[0])):
+                    if entry.get("type") == "session_info":
+                        name = clean_title(entry.get("name"))
+                        tail_named = True
+            if name is None and not pick.value and size > HEAD:
+                head_name, head_named, pick = scan(min(size, RESCAN))
+                if head_named and not tail_named:
+                    name = head_name
+            yield Session("pi", sid, cwd, name or pick.value, mtime(f), f, size)
+
+
 def gemini_text(content) -> str | None:
     """Gemini message content is a plain string in older sessions, or a list
     of {"text": ...} blocks (no "type" tag, unlike Anthropic/OpenAI blocks)."""
@@ -562,7 +612,8 @@ def gemini_messages(f: Path) -> list[tuple[str, str]]:
     for m in raw:
         if not isinstance(m, dict):
             continue
-        role = GEMINI_ROLE.get(m.get("type"))
+        kind = m.get("type")
+        role = GEMINI_ROLE.get(kind) if isinstance(kind, str) else None
         text = strip_wrappers(gemini_text(m.get("content"))) if role else None
         if text:
             out.append((role, text))
@@ -616,6 +667,7 @@ ADAPTERS = {
     "copilot": a_copilot,
     "grok": a_grok,
     "kimi": a_kimi,
+    "pi": a_pi,
     "gemini": a_gemini,
 }
 
@@ -651,6 +703,7 @@ COLORS = {
     "grok": CP_MAUVE,
     "kimi": CP_FLAMINGO,
     "gemini": CP_YELLOW,
+    "pi": CP_LAVENDER,
 }
 
 # --------------------------------------------------------------- previewers
@@ -801,6 +854,47 @@ def prev_kimi(s: Session):
     return widen_tail(Path(s.path) / "agents" / "main" / "wire.jsonl", parse)
 
 
+def prev_pi(s: Session):
+    def parse(blob):
+        entries, by_id = [], {}
+        for e in iter_lines(blob):
+            if e.get("type") == "session":
+                continue
+            entries.append(e)
+            if isinstance(e.get("id"), str):
+                by_id[e["id"]] = e
+        if not entries:
+            return []
+
+        # Session files are append-only trees whose last entry is the active
+        # leaf. Follow its parents when the bounded tail contains them so a
+        # preview does not mix in abandoned branches; fall back to append
+        # order for legacy v1 files without id links.
+        source = entries
+        if by_id:
+            path, seen, cur = [], set(), entries[-1]
+            while cur and cur.get("id") not in seen:
+                path.append(cur)
+                if isinstance(cur.get("id"), str):
+                    seen.add(cur["id"])
+                cur = by_id.get(cur.get("parentId"))
+            if path:
+                source = reversed(path)
+
+        out = []
+        for e in source:
+            if e.get("type") != "message":
+                continue
+            msg = e.get("message") or {}
+            if msg.get("role") not in ("user", "assistant"):
+                continue
+            text = strip_wrappers(blocks_to_text(msg.get("content")))
+            if text:
+                out.append((msg["role"], text))
+        return out[-MAX_TURNS:]
+    return widen_tail(Path(s.path), parse)
+
+
 def prev_gemini(s: Session):
     return gemini_messages(Path(s.path))[-MAX_TURNS:]
 
@@ -813,6 +907,7 @@ PREVIEW = {
     "copilot": prev_copilot,
     "grok": prev_grok,
     "kimi": prev_kimi,
+    "pi": prev_pi,
     "gemini": prev_gemini,
     # cursor's transcript lives in an undocumented sqlite blob format we don't
     # decode, so it has no previewer and falls back to a plain notice.
@@ -1116,6 +1211,7 @@ def render_preview(session: Session, width: int, height: int, color: bool) -> li
     `height` lines like a chat scrollback — always returns exactly `height`
     lines so the caller can paste it next to the list unconditionally."""
     fn = PREVIEW.get(session.agent)
+    body = []
     if fn is None:
         body = [f"({session.agent}: no transcript preview — press p for the path)"]
     else:
@@ -1153,7 +1249,7 @@ def repo_root(start: Path) -> Path:
         if out.returncode == 0 and out.stdout.strip():
             return Path(out.stdout.strip())
     except Exception:
-        pass
+        return start
     return start
 
 
@@ -1172,13 +1268,16 @@ def rel_age(ts: float, now: float) -> str:
     if ts <= 0:
         return "?"
     d = max(0, now - ts)
-    for cut, div, unit in (
-        (90, 1, "s"), (5400, 60, "m"), (172800, 3600, "h"),
-        (1209600, 86400, "d"), (7776000, 604800, "w"),
-    ):
-        if d < cut:
-            return f"{int(d / div)}{unit}"
-    return f"{int(d / 2592000)}mo"
+    try:
+        for cut, div, unit in (
+            (90, 1, "s"), (5400, 60, "m"), (172800, 3600, "h"),
+            (1209600, 86400, "d"), (7776000, 604800, "w"),
+        ):
+            if d < cut:
+                return f"{int(d / div)}{unit}"
+        return f"{int(d / 2592000)}mo"
+    except (OverflowError, ValueError):
+        return "?"
 
 
 def human_size(n: int) -> str:
@@ -1365,6 +1464,7 @@ RESUME = {
     "copilot": ["copilot", "--resume", "{id}"],
     "grok": ["grok", "--resume", "{id}"],
     "kimi": ["kimi", "--session", "{id}"],
+    "pi": ["pi", "--session", "{id}"],
 }
 
 HINTS = ("j/k gg/G ^d/^u move · drag │ resize panes · [ and ] resize keys · / filter · "
@@ -1424,7 +1524,7 @@ def read_key(fh) -> str | tuple[str, int, int, int, str]:
 def browse(sessions, root, args):
     """Scrollable session list with a mouse-draggable preview splitter."""
     try:
-        tty_in = open("/dev/tty", "rb", buffering=0)
+        tty_in = open("/dev/tty", "rb", buffering=0)  # noqa: SIM115 - closed in finally after raw-mode restore
     except OSError:
         return "plain", None, []
     import termios
@@ -1458,6 +1558,11 @@ def browse(sessions, root, args):
     SPLITTER_COLS = 3  # one pad column on either side of the visible divider
     preferred_dir_width = preferred_title_width = None
     dragging_splitter = None
+
+    def bar(which):
+        divider = "║" if dragging_splitter == which else "│"
+        style = CP_LAVENDER if dragging_splitter == which else CP_OVERLAY
+        return f"\033[{style}m{divider}\033[0m " if color else f"{divider} "
 
     def clamp_dir_width(width, cols, title_width):
         return max(MIN_DIR_COLS, min(width, cols - 2 * SPLITTER_COLS - title_width - MIN_PREVIEW_COLS))
@@ -1513,10 +1618,6 @@ def browse(sessions, root, args):
                 if key != preview_key:
                     preview_lines = render_preview(view[cur], prev_width, page, color)
                     preview_key = key
-                def bar(which):
-                    divider = "║" if dragging_splitter == which else "│"
-                    style = CP_LAVENDER if dragging_splitter == which else CP_OVERLAY
-                    return f"\033[{style}m{divider}\033[0m " if color else f"{divider} "
                 bar_dir, bar_title = bar("dir"), bar("title")
                 preview_name = view[cur].title or "(unnamed session)"
                 name_width = max(0, prev_width - len("PREVIEW · "))
@@ -1680,8 +1781,8 @@ def resume(s: Session) -> int:
     except OSError:
         print(f"lc: {s.cwd} is gone; resuming from {os.getcwd()}", file=sys.stderr)
     print(f"\033[2;{CP_SUBTEXT}m$ {' '.join(argv)}\033[0m")
-    os.execvp(argv[0], argv)
-    return 127
+    completed = subprocess.run(argv, check=False)
+    return completed.returncode
 
 
 def main() -> int:

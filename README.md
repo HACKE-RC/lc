@@ -89,7 +89,7 @@ The selected session's age and transcript size appear at the bottom right.
 
 ## Names and performance
 
-Codex and Claude Code native names take precedence. Other stores fall back to the first useful user prompt. Generic startup titles and injected context are ignored.
+Codex, Claude Code, and pi native names take precedence. Other stores fall back to the first useful user prompt. Generic startup titles and injected context are ignored.
 
 Codex rollouts can add up. `lc` reads compact metadata first and only opens a full transcript when it needs a title. It keeps a disposable local cache at:
 
@@ -101,7 +101,7 @@ If `XDG_CACHE_HOME` is unset, the path is `~/.cache/lc/codex-sessions.json`. The
 
 ## Supported stores
 
-Claude Code, Codex, Droid, OpenCode, Cursor, GitHub Copilot, Grok, Kimi, and Gemini. Missing stores are ignored.
+Claude Code, Codex, Droid, OpenCode, Cursor, GitHub Copilot, Grok, Kimi, Gemini, and pi. Missing stores are ignored.
 
 ## Development
 

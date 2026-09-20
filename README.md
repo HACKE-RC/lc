@@ -28,7 +28,7 @@ sh scripts/install.sh
 
 The checkout installer prefers `uv tool install`, then `pipx`, then `pip --user`. Make sure the resulting scripts directory is on your `PATH`, then run `lc`.
 
-The current PyPI distribution is `list-coding-agents` version `0.1.0`. Its import package and command are both still `lc`:
+The current PyPI distribution is `list-coding-agents` version `0.2.0`. Its import package and command are both still `lc`:
 
 ```sh
 lc --version

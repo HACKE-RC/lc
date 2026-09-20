@@ -4,7 +4,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -16,7 +15,7 @@ class EntrypointTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.stdout.strip(), "lc 0.1.0")
+        self.assertEqual(result.stdout.strip(), "lc 0.2.0")
 
     def test_module_entrypoint_reports_version(self):
         result = subprocess.run(
@@ -26,4 +25,4 @@ class EntrypointTests(unittest.TestCase):
             text=True,
             env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
         )
-        self.assertEqual(result.stdout.strip(), "lc 0.1.0")
+        self.assertEqual(result.stdout.strip(), "lc 0.2.0")

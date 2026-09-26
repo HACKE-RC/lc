@@ -6,7 +6,7 @@ and prints the sessions whose working directory lives inside the current git
 repository (or the current directory when not in a repo).
 
 Supported agents: claude (Claude Code), codex, droid (Factory), opencode,
-cursor, copilot, grok, kimi, gemini, pi.
+cursor, copilot, grok, kimi, gemini, pi, omp (oh-my-pi).
 
 `lc -I` browses the same list with vim keys and resumes the selected session
 in the agent that created it.
@@ -578,6 +578,53 @@ def a_pi(keep, dir_ok):
             yield Session("pi", sid, cwd, name or pick.value, mtime(f), f, size)
 
 
+def omp_sessions_dir() -> Path:
+    """omp moves its data under $XDG_DATA_HOME/omp once that directory exists."""
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg and (Path(xdg) / "omp").is_dir():
+        return Path(xdg) / "omp" / "sessions"
+    return HOME / ".omp" / "agent" / "sessions"
+
+
+def a_omp(keep, dir_ok):
+    for pdir in iter_dirs(omp_sessions_dir()):
+        # Subagent transcripts live in a <session>/ directory beside their
+        # parent; only top-level files are sessions a user started.
+        for f in pdir.glob("*.jsonl"):
+            # Current files open with a fixed-width title slot that omp rewrites
+            # in place; legacy files start directly with the session header.
+            head = jsonl_head(f, CWD_HEAD)
+            first = next(head, None)
+            if not isinstance(first, dict):
+                continue
+            slot = first if first.get("type") == "title" else None
+            header = next(head, None) if slot else first
+            if not isinstance(header, dict) or header.get("type") != "session":
+                continue
+            sid, cwd = header.get("id"), header.get("cwd")
+            if not isinstance(sid, str) or not isinstance(cwd, str) or not cwd:
+                continue
+            if not keep(cwd):
+                continue
+
+            size = size_of(f)
+            title = (clean_title(slot.get("title")) if slot else None) or clean_title(header.get("title"))
+            if not title:
+                def scan(limit, f=f):
+                    pick = TitlePick()
+                    for entry in jsonl_head(f, limit):
+                        if entry.get("type") != "message":
+                            continue
+                        message = entry.get("message") or {}
+                        if message.get("role") == "user" and pick.offer(blocks_to_text(message.get("content"))):
+                            break
+                    return cwd, pick
+
+                title = scan_twice(scan, size)[1].value
+            yield Session("omp", sid, cwd, title, mtime(f), f, size)
+
+
+
 def gemini_text(content) -> str | None:
     """Gemini message content is a plain string in older sessions, or a list
     of {"text": ...} blocks (no "type" tag, unlike Anthropic/OpenAI blocks)."""
@@ -668,6 +715,7 @@ ADAPTERS = {
     "grok": a_grok,
     "kimi": a_kimi,
     "pi": a_pi,
+    "omp": a_omp,
     "gemini": a_gemini,
 }
 
@@ -704,6 +752,7 @@ COLORS = {
     "kimi": CP_FLAMINGO,
     "gemini": CP_YELLOW,
     "pi": CP_LAVENDER,
+    "omp": CP_PEACH,
 }
 
 # --------------------------------------------------------------- previewers
@@ -908,6 +957,7 @@ PREVIEW = {
     "grok": prev_grok,
     "kimi": prev_kimi,
     "pi": prev_pi,
+    "omp": prev_pi,  # omp keeps pi's append-only entry tree
     "gemini": prev_gemini,
     # cursor's transcript lives in an undocumented sqlite blob format we don't
     # decode, so it has no previewer and falls back to a plain notice.
@@ -1465,6 +1515,7 @@ RESUME = {
     "grok": ["grok", "--resume", "{id}"],
     "kimi": ["kimi", "--session", "{id}"],
     "pi": ["pi", "--session", "{id}"],
+    "omp": ["omp", "--resume", "{id}"],
 }
 
 HINTS = ("j/k gg/G ^d/^u move · drag │ resize panes · [ and ] resize keys · / filter · "

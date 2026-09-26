@@ -1,8 +1,10 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,6 +104,27 @@ class AdapterTitleFallbackTests(unittest.TestCase):
             ("user", "First"),
             ("user", "Active branch"),
         ])
+
+    def omp_session(self, path, sid, *entries, slot=None, header_title=None):
+        header = {"type": "session", "version": 3, "id": sid, "cwd": self.cwd}
+        if header_title:
+            header["title"] = header_title
+        head = [] if slot is None else [{"type": "title", "v": 1, "title": slot, "pad": " " * 64}]
+        jsonl(path, [*head, header, *entries])
+
+    def test_omp_title_slot_then_header_then_user_prompt(self):
+        base = self.home / ".omp/agent/sessions/-repo"
+        prompt = {"type": "message", "message": {"role": "user", "content": [
+            {"type": "text", "text": "Omp fallback"}]}}
+        reminder = {"type": "message", "message": {"role": "developer", "content": "Stop early"}}
+        self.omp_session(base / "slot.jsonl", "slot", prompt, slot="Renamed", header_title="Old")
+        self.omp_session(base / "legacy.jsonl", "legacy", prompt, header_title="Legacy title")
+        self.omp_session(base / "blank.jsonl", "blank", reminder, prompt, slot="")
+        # Subagent transcripts sit under the parent session's directory.
+        self.omp_session(base / "slot/Worker.jsonl", "worker", prompt, slot="Subagent")
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": ""}):
+            sessions = {s.sid: s.title for s in self.sessions(lc.a_omp)}
+        self.assertEqual(sessions, {"slot": "Renamed", "legacy": "Legacy title", "blank": "Omp fallback"})
 
     def test_titles_are_bounded_labels_not_transcript_exports(self):
         title = lc.clean_title("x" * 10_000)

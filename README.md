@@ -122,3 +122,15 @@ go test ./...
 ```
 
 The tests cover title fallbacks, preview branch-following, wrapper stripping, folder patterns, timestamp parsing, and the Codex cache contract.
+
+### Demo data
+
+`scripts/demo` writes a fake home directory with 30 sessions from all 11 agents, each in that agent's real store format. They all belong to a made-up repository, `nimbus`. Use it for screenshots and demos without exposing real transcripts:
+
+```sh
+go run ./scripts/demo          # writes /tmp/lc-demo (or pass another directory)
+/tmp/lc-demo/run.sh            # lc -I on the demo repository
+/tmp/lc-demo/run.sh -n 0       # any other lc arguments, e.g. the table
+```
+
+`run.sh` points `HOME` and the XDG variables at the demo directory, so your real sessions and cache are untouched. The session ids are fake, so press `p` rather than `Enter`: resuming would start the real agent. Rerunning the script replaces the directory, and it refuses to overwrite a directory it didn't create.

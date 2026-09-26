@@ -2,6 +2,9 @@
 
 `lc` lists local coding-agent sessions for the Git repository you are in and lets you browse, preview, and resume them. It reads local session stores only; no transcript leaves your machine.
 
+<img width="2560" height="1502" alt="image" src="https://github.com/user-attachments/assets/2ee7361f-554d-4614-98d3-e4dc15757735" />
+
+
 ## Install
 
 With Go 1.25 or newer:
